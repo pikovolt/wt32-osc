@@ -58,23 +58,29 @@ NRPN_OSC_MSB = 0
 #  WT32-OSC Parameter Definitions (must match header.c)
 # ============================================================================
 
+# Total banks: 48 presets + 6 user = 54                    [M-1]
+
 # params[0] = A knob (shape):    BnkA  min=0 max=1023
 # params[1] = B knob (altshape): Mrph  min=0 max=1023
-# params[2] = NRPN PARAM1:       BnkB  min=0 max=63
+# params[2] = NRPN PARAM1:       BnkB  min=0 max=53       [M-1]
 # params[3] = NRPN PARAM2:       Ctrl  min=0 max=15
 # params[4] = NRPN PARAM3:       DTun  min=0 max=100
 # params[5] = NRPN PARAM4:       WrAd  min=0 max=255
 # params[6] = NRPN PARAM5:       WrDt  min=0 max=255
 
+TOTAL_BANKS = 54    # [M-1] 48 presets + 6 user
+MAX_BANK_INDEX = TOTAL_BANKS - 1  # 53
+NUM_USER_SLOTS = 6
+
 PARAM_RANGES = {
     'BnkA': {'index': 0, 'min': 0, 'max': 1023, 'type': 'cc14',
-             'desc': 'Stage A bank (0-63, scaled from 0-1023)'},
+             'desc': 'Stage A bank (0-53, scaled from 0-1023)'},      # [M-1]
     'Mrph': {'index': 1, 'min': 0, 'max': 1023, 'type': 'cc14',
              'desc': 'Morph A<>B (0-1023)'},
-    'BnkB': {'index': 2, 'min': 0, 'max': 63,   'type': 'nrpn', 'nrpn_lsb': 0,
-             'desc': 'Stage B bank (0-63)'},
+    'BnkB': {'index': 2, 'min': 0, 'max': 53,   'type': 'nrpn', 'nrpn_lsb': 0,   # [M-1]
+             'desc': 'Stage B bank (0-53)'},
     'Ctrl': {'index': 3, 'min': 0, 'max': 15,   'type': 'nrpn', 'nrpn_lsb': 1,
-             'desc': 'Control: bit[2:0]=bit-depth, bit[3]=interp'},
+             'desc': 'Control: bit[2:0]=bit-depth, bit[3]=interp, bit[4]=fold_type'},
     'DTun': {'index': 4, 'min': 0, 'max': 100,  'type': 'nrpn', 'nrpn_lsb': 2,
              'desc': 'Detune (0-100 = 0-50 cents)'},
     'WrAd': {'index': 5, 'min': 0, 'max': 255,  'type': 'nrpn', 'nrpn_lsb': 3,
@@ -82,6 +88,35 @@ PARAM_RANGES = {
     'WrDt': {'index': 6, 'min': 0, 'max': 255,  'type': 'nrpn', 'nrpn_lsb': 4,
              'desc': 'Write data (auto-increment)'},
 }
+
+# ============================================================================
+#  WrAd Address Map (v2 protocol, matches osc.h applyParam)
+# ============================================================================
+#
+#   0- 15 : Stage A (write_index = value*2, 16 addresses × auto-incr → 32 samples)
+#  16- 31 : Stage B (write_index = (value-16)*2)
+#  32-239 : User banks (bank = (value-32)/16, write_index = ((value-32)%16)*2)
+#           User 0:  32- 47
+#           User 1:  48- 63
+#           User 2:  64- 79
+#           User 3:  80- 95
+#           User 4:  96-111
+#           User 5: 112-127
+# 240-255 : Control registers
+#           240: SubM (sub-oscillator mix, 0-100)
+#           241: Fold (wavefold drive, 0-100)
+#           242: OpMd (wave operation mode, 0-5)
+
+WRAD_STAGE_A_BASE = 0
+WRAD_STAGE_B_BASE = 16
+WRAD_USER_BASE    = 32
+WRAD_USER_STRIDE  = 16
+WRAD_CTRL_BASE    = 240
+
+# Control register indices
+CTRL_REG_SUBM = 0   # WrAd=240
+CTRL_REG_FOLD = 1   # WrAd=241
+CTRL_REG_OPMD = 2   # WrAd=242
 
 # ============================================================================
 #  Wave Generation Helpers
@@ -151,7 +186,6 @@ class WT32Sender:
     def send_cc(self, cc, value):
         """Send a single MIDI CC message (7-bit value)."""
         value = max(0, min(127, int(value)))
-        # print(f"    CC#{cc:3d}  {value:3d}  (ch={self.channel})")
         self.midi_out.send_message([0xB0 | self.channel, cc, value])
 
     def send_cc14(self, cc_msb, cc_lsb, value14):
@@ -190,7 +224,6 @@ class WT32Sender:
         value = max(p['min'], min(p['max'], int(value)))
 
         if p['type'] == 'cc14':
-            # CC14: NTS-1 が 14-bit→param range に線形スケールするため、逆変換が必要
             param_range = p['max'] - p['min']
             midi14 = min(16383, math.ceil((value - p['min']) * 16383 / param_range)) if param_range > 0 else 0
             if p['index'] == 0:
@@ -199,7 +232,6 @@ class WT32Sender:
                 self.send_cc14(CC_OSC_B_MSB, CC_OSC_B_LSB, midi14)
 
         elif p['type'] == 'nrpn':
-            # NTS-1 mkII は CC14 と同じ linear scale (0-16383) で解釈する
             param_range = p['max'] - p['min']
             midi14 = min(16383, math.ceil((value - p['min']) * 16383 / param_range)) if param_range > 0 else 0
             self.send_nrpn(NRPN_OSC_MSB, p['nrpn_lsb'], midi14)
@@ -208,7 +240,7 @@ class WT32Sender:
 
     def select_bank(self, stage, bank_index):
         if stage == 'a':
-            param_val = math.ceil(bank_index * 1023 / 63)   # ← ceil
+            param_val = math.ceil(bank_index * 1023 / MAX_BANK_INDEX)  # [M-1] 63->53
             self.set_param('BnkA', param_val)
             print(f"  Stage A -> bank {bank_index} (param={param_val})")
         elif stage == 'b':
@@ -220,37 +252,63 @@ class WT32Sender:
         param_val = int(percent * 1023 / 100)
         self.set_param('Mrph', param_val)
 
+    def set_control_register(self, reg_name, value, delay=0.008):
+        """Write a control register via WrAd(240+)/WrDt protocol.
+
+        Args:
+            reg_name: 'SubM' (0-100), 'Fold' (0-100), or 'OpMd' (0-5)
+            value: register value (unsigned 0-255, clamped by firmware)
+            delay: inter-message delay in seconds
+        """
+        reg_map = {'SubM': CTRL_REG_SUBM, 'Fold': CTRL_REG_FOLD, 'OpMd': CTRL_REG_OPMD}
+        if reg_name not in reg_map:
+            print(f"  Unknown control register: {reg_name}")
+            print(f"  Available: {', '.join(reg_map.keys())}")
+            return
+
+        wrad_val = WRAD_CTRL_BASE + reg_map[reg_name]
+        self.set_param('WrAd', wrad_val)
+        time.sleep(delay)
+
+        # WrDt sends unsigned value; firmware interprets per register
+        self.set_param('WrDt', max(0, min(255, int(value))))
+        time.sleep(delay)
+        print(f"  Set {reg_name} = {value} (WrAd={wrad_val})")
+
     def write_wave(self, target, wave_data, delay=0.008):
         """Write a 32-byte waveform to the specified target.
 
+        v2 protocol: WrAd maps to compressed address space.
+          stage_a: WrAd=0  (0-15 range, index=value*2)
+          stage_b: WrAd=16 (16-31 range, index=(value-16)*2)
+          user:N:  WrAd=32+N*16
+
         Args:
-            target: 'stage_a', 'stage_b', or 'user:N' (N=0-15)
+            target: 'stage_a', 'stage_b', or 'user:N' (N=0-5)
             wave_data: list of 32 signed 8-bit integers (-128..127)
             delay: inter-message delay in seconds
         """
         if len(wave_data) != 32:
             raise ValueError(f"Wave data must be 32 samples, got {len(wave_data)}")
 
-        # Determine WrAd value (matches unit.cc apply_param logic)
         if target == 'stage_a':
-            addr_base = 0       # 0-31 = Stage A
+            addr_base = WRAD_STAGE_A_BASE
         elif target == 'stage_b':
-            addr_base = 32      # 32-63 = Stage B
+            addr_base = WRAD_STAGE_B_BASE
         elif target.startswith('user:'):
             bank = int(target.split(':')[1])
-            if bank < 0 or bank > 5:
-                raise ValueError("User bank must be 0-5 (WrAd max=255 limits addressable banks)")
-            addr_base = 64 + bank * 32   # 64+ = User banks
+            if bank < 0 or bank >= NUM_USER_SLOTS:
+                raise ValueError(f"User bank must be 0-{NUM_USER_SLOTS - 1}")
+            addr_base = WRAD_USER_BASE + bank * WRAD_USER_STRIDE
         else:
             raise ValueError(f"Unknown target: {target}")
 
-        # Set write address via NRPN
+        # Set write address (starting at sample 0)
         self.set_param('WrAd', addr_base)
         time.sleep(delay)
 
-        # Write 32 samples via WrDt
+        # Write 32 samples via WrDt (auto-increment in firmware)
         for i, sample in enumerate(wave_data):
-            # Convert signed (-128..127) to unsigned (0..255)
             unsigned_val = (sample + 128) & 0xFF
             self.set_param('WrDt', unsigned_val)
             time.sleep(delay)
@@ -278,9 +336,7 @@ def cmd_list_ports():
 
 
 def cmd_demo(sender):
-    """Send demo waveforms to user banks 0-5.
-    Note: WrAd max=255 limits addressable user banks to 0-5.
-    """
+    """Send demo waveforms to user banks 0-5."""
     demos = [
         ("Odd harmonics",  generate_sine({1: 1.0, 3: 0.5, 5: 0.25, 7: 0.125})),
         ("Even harmonics", generate_sine({1: 1.0, 2: 0.6, 4: 0.3, 6: 0.15})),
@@ -331,12 +387,13 @@ def cmd_interactive(sender):
     print()
     print("=== WT32 Interactive Wave Editor ===")
     print("Commands:")
-    print("  formula <expr>              - Generate wave (var: x = 0..1)")
+    print("  formula <expr>              - Generate wave (var: x = 0.0~1.0)")
     print("  harmonics <h:a h:a ...>     - Generate from harmonics")
     print("  send <target>               - Send wave (stage_a / stage_b / user:N)")
-    print("  bank a|b <index>            - Select bank (0-63)")
+    print("  bank a|b <index>            - Select bank (0-53)")           # [M-1]
     print("  morph <0-100>               - Set morph position")
     print("  param <name> <value>        - Set raw parameter")
+    print("  ctrl <reg> <value>          - Set control register (SubM/Fold/OpMd)")
     print("  show                        - Display current wave")
     print("  help                        - Show this help")
     print("  quit                        - Exit")
@@ -364,10 +421,11 @@ def cmd_interactive(sender):
         elif cmd == 'help':
             print("  formula <expr>     - e.g. formula sin(x * 2 * pi)")
             print("  harmonics <h:a>    - e.g. harmonics 1:1.0 3:0.5 5:0.25")
-            print("  send <target>      - stage_a, stage_b, user:0..15")
+            print("  send <target>      - stage_a, stage_b, user:0..5")   # [L-1]
             print("  bank a|b <N>       - e.g. bank a 6  (brass preset)")
             print("  morph <0-100>      - e.g. morph 50")
             print("  param <name> <val> - e.g. param Ctrl 8")
+            print("  ctrl <reg> <val>   - e.g. ctrl SubM 50, ctrl Fold 80, ctrl OpMd 2")
             print("  show               - ASCII waveform display")
 
         elif cmd == 'formula' and arg:
@@ -408,6 +466,14 @@ def cmd_interactive(sender):
             else:
                 print("  Usage: param <name> <value>")
                 print("  Names: BnkA, Mrph, BnkB, Ctrl, DTun, WrAd, WrDt")
+
+        elif cmd == 'ctrl' and arg:
+            tokens = arg.split()
+            if len(tokens) == 2:
+                sender.set_control_register(tokens[0], int(tokens[1]))
+            else:
+                print("  Usage: ctrl <reg> <value>")
+                print("  Registers: SubM (0-100), Fold (0-100), OpMd (0-5)")
 
         elif cmd == 'show':
             print("  " + "-" * 34)

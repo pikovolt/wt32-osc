@@ -88,6 +88,8 @@ __unit_callback void unit_render(const float *in, float *out, uint32_t frames)
 
 __unit_callback void unit_set_param_value(uint8_t id, int32_t value)
 {
+    if (id >= unit_header.num_params) return;  // [L-2] id範囲チェック
+
     value = clipminmaxi32(unit_header.params[id].min, value, unit_header.params[id].max);
     s_cached_values[id] = value;
     s_processor.setParameter(id, value);
@@ -95,6 +97,7 @@ __unit_callback void unit_set_param_value(uint8_t id, int32_t value)
 
 __unit_callback int32_t unit_get_param_value(uint8_t id)
 {
+    if (id >= unit_header.num_params) return 0;  // [L-3] id範囲チェック
     return s_cached_values[id];
 }
 

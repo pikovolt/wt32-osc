@@ -34,8 +34,8 @@
 /*
  *  File: osc.h
  *
- *  Dummy oscillator template instance.
- *
+ *  WT32-OSC oscillator implementation.
+ *  DSP core with wavetable engine, sub-oscillator, wave operations, and wavefold.
  */
 #pragma once
 
@@ -45,18 +45,21 @@
 #include <cstring>
 
 // ============================================================================
-//  Constants (from unit.cc)
+//  Constants
 // ============================================================================
 
 static constexpr uint32_t WAVE_LEN_OSC       = 32;
 static constexpr uint32_t NUM_PRESETS_OSC    = 48;
 static constexpr uint32_t NUM_USER_SLOTS_OSC = 6;
-static constexpr uint32_t TOTAL_BANKS_OSC    = NUM_PRESETS_OSC + NUM_USER_SLOTS_OSC;
+static constexpr uint32_t TOTAL_BANKS_OSC    = NUM_PRESETS_OSC + NUM_USER_SLOTS_OSC;  // = 54
 
 #define q31_to_f32_c 4.65661287307739e-010f
 #define q31_to_f32(q) ((float)(q) * q31_to_f32_c)
 
-// preset_waves は unit.cc と同内容をここにも定義する
+// ============================================================================
+//  Preset Wavetables (signed 8-bit, 32 samples each)
+// ============================================================================
+
 static const int8_t osc_preset_waves[16][WAVE_LEN_OSC] = {
     {   0,  24,  48,  70,  89, 105, 117, 124,
       127, 124, 117, 105,  89,  70,  48,  24,
@@ -133,7 +136,7 @@ class Osc : public Processor
 public:
     uint32_t getBufferSize() const override final { return 0; }
 
-    // ---- 内部状態 (unit.cc の s 構造体に相当) ----
+    // ---- 内部状態 ----
     struct State {
         int8_t  banks[TOTAL_BANKS_OSC][WAVE_LEN_OSC];
         int8_t  stage_a[WAVE_LEN_OSC];
@@ -155,6 +158,7 @@ public:
         uint8_t write_bank;
         uint8_t write_index;
         uint8_t write_count;
+        uint8_t write_armed;    // [H-1] 0=locked, 1=accepting writes
 
         uint8_t op_mode;
         uint8_t fold_type;
@@ -168,6 +172,7 @@ public:
         w0_  = 0.f;
         lfo_ = 0.f;
 
+        // write_armed = 0 by memset (locked on startup) [H-1]
         memset(&s_, 0, sizeof(s_));
 
         for (uint32_t i = 0; i < 16; i++)
@@ -212,7 +217,6 @@ public:
 
     void process(const float *__restrict /*in*/, float *__restrict out, uint32_t frames) override final
     {
-        // w0 は setPitch() で設定済み (f/samplerate 単位)
         const float w0 = w0_;
 
         float morph = s_.morph;
@@ -320,6 +324,7 @@ private:
             break;
         }
         s_.write_count = 0;
+        s_.write_armed = 0;  // [H-1] commit完了でロック
     }
 
     static inline float readWt(const int8_t *tbl, float phase, uint8_t interp)
@@ -343,24 +348,27 @@ private:
     {
         switch (id) {
         case k_unit_osc_fixed_param_shape:
-            loadStageA((uint8_t)((value * 63) / 1023));
+            loadStageA((uint8_t)((value * (TOTAL_BANKS_OSC - 1)) / 1023));  // [M-1] 63->53
             break;
         case k_unit_osc_fixed_param_altshape:
             s_.morph = param_val_to_f32(value);
             break;
-        case k_num_unit_osc_fixed_param_id + 0:
+        case k_num_unit_osc_fixed_param_id + 0:  // BnkB
             loadStageB((uint8_t)(value & 0x3F));
             break;
-        case k_num_unit_osc_fixed_param_id + 1:
+        case k_num_unit_osc_fixed_param_id + 1:  // Ctrl
             s_.bit_depth   = (uint8_t)(value & 0x07);
             s_.interp_mode = (uint8_t)((value >> 3) & 0x01);
             s_.fold_type   = (uint8_t)((value >> 4) & 0x01);
             break;
-        case k_num_unit_osc_fixed_param_id + 2:
+        case k_num_unit_osc_fixed_param_id + 2:  // DTun
             s_.detune = (float)value * 0.5f;
             break;
+
+        // ---- WrAd ----
         case k_num_unit_osc_fixed_param_id + 3:
             if (value >= 240) {
+                // Control register mode
                 s_.write_target = 3;
                 s_.write_index  = (uint8_t)(value - 240);
                 s_.write_count  = 0;
@@ -383,28 +391,37 @@ private:
                 if (s_.write_bank < NUM_USER_SLOTS_OSC)
                     memcpy(s_.write_buf, s_.banks[NUM_PRESETS_OSC + s_.write_bank], WAVE_LEN_OSC);
             }
+            s_.write_armed = 1;  // [H-1] 書き込み受付開始（全targetで共通）
             break;
+
+        // ---- WrDt ----
         case k_num_unit_osc_fixed_param_id + 4:
         {
+            if (!s_.write_armed) break;  // [H-1] ロック中は無視
+
             if (s_.write_target == 3) {
+                // Control register: single value write, then lock
                 uint8_t v = (uint8_t)(value & 0xFF);
                 switch (s_.write_index) {
                 case 0: s_.sub_mix    = (float)(v > 100 ? 100 : v) * 0.01f; break;
                 case 1: { uint8_t f = (v > 100) ? 100 : v; s_.fold_drive = (float)f * 0.04f; break; }
                 case 2: s_.op_mode    = (v > 5) ? 5 : v; break;
                 }
-                s_.write_target = 0;
+                s_.write_armed = 0;  // [H-1] control register書き込み後ロック
                 break;
             }
+
+            // Wave data write
+            // [H-1] デッドコード if (write_index < WAVE_LEN_OSC) を削除
+            //        write_index は & マスクで常に 0-31 に収まる
             int8_t sample = (int8_t)((value & 0xFF) - 128);
-            if (s_.write_index < WAVE_LEN_OSC) {
-                s_.write_buf[s_.write_index] = sample;
-                s_.write_index = (s_.write_index + 1) & (WAVE_LEN_OSC - 1);
-                if (++s_.write_count >= WAVE_LEN_OSC)
-                    commitWrite();
-            }
+            s_.write_buf[s_.write_index] = sample;
+            s_.write_index = (s_.write_index + 1) & (WAVE_LEN_OSC - 1);
+            if (++s_.write_count >= WAVE_LEN_OSC)
+                commitWrite();  // commitWrite 内で write_armed=0 [H-1]
             break;
         }
+
         case k_num_unit_osc_fixed_param_id + 5:
         {
             s_.op_mode = (uint8_t)((value >> 7) & 0x07);

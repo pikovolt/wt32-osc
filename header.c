@@ -17,14 +17,14 @@ const __attribute__((section(".unit_header"))) unit_header_t unit_header = {
     .api         = UNIT_API_VERSION,
     .dev_id      = WT32_DEV_ID,
     .unit_id     = 0x00010000,
-    .version     = 0x00010000,
+    .version     = 0x00020000,  // [M-1] version bump: 1.0.0 -> 2.0.0
     .name        = "WT32",
     .reserved0   = 0x0,
     .reserved1   = 0x0,
     .num_params  = 7,
     .params = {
         /* [0] A knob (shape): BnkA - Stage A wave bank select
-         * Platform sends 0-1023 (10bit). Internally scaled to 0-63. */
+         * Platform sends 0-1023 (10bit). Internally scaled to 0-53. */
         { .min    = 0,
           .max    = 1023,
           .center = 0,
@@ -49,7 +49,7 @@ const __attribute__((section(".unit_header"))) unit_header_t unit_header = {
 
         /* [2] encoder: BnkB - Stage B wave bank select */
         { .min    = 0,
-          .max    = 63,
+          .max    = 53,   // [M-1] 63->53 (TOTAL_BANKS-1)
           .center = 0,
           .init   = 1,
           .type   = k_unit_param_type_enum,
@@ -58,7 +58,7 @@ const __attribute__((section(".unit_header"))) unit_header_t unit_header = {
           .reserved  = 0,
           .name   = "BnkB" },
 
-        /* [3] encoder: Ctrl - bit[2:0]=bit-depth, bit[3]=interpolation */
+        /* [3] encoder: Ctrl - bit[2:0]=bit-depth, bit[3]=interp */
         { .min    = 0,
           .max    = 15,
           .center = 0,
