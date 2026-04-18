@@ -262,5 +262,5 @@ wasm:
 		$(WASMSRC) \
 		-o $(WASMDIR)/$(PROJECT).html
 	@echo Done
-	@echo Opening the sandbox
-	@$(EMCC_BIN_PATH)/emrun --browser chrome --serve_after_close $(WASMDIR)/$(PROJECT).html
+	@echo Run: cd $(WASMDIR) \&\& python serve.py 8000
+	@echo Open: http://localhost:8000/$(PROJECT).html
